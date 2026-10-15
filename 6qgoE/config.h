@@ -25,3 +25,11 @@
 #define NAVIGATOR_SCROLL_INVERT_Y
 #define RGB_MATRIX_STARTUP_SPD 60
 
+// Enable high-resolution scrolling
+#define POINTING_DEVICE_HIRES_SCROLL_ENABLE
+
+// Optional: Adjust the resolution multiplier (Range: 1 to 127. Default: 120)
+#define POINTING_DEVICE_HIRES_SCROLL_MULTIPLIER 20
+
+// Optional: Adjust the resolution exponent (Range: 0 to 127. Default: 0)
+#define POINTING_DEVICE_HIRES_SCROLL_EXPONENT 4
