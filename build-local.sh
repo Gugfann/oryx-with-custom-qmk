@@ -4,8 +4,9 @@
 #
 # Usage:
 #   ./build-local.sh                  build the layout currently in ./<layout_id>
-#   ./build-local.sh --fetch          pull the latest layout from Oryx, merge it into the
-#                                     current branch (like the GitHub Action), then build
+#   ./build-local.sh --fetch          pull the latest layout from Oryx and merge it with the
+#                                     committed layout in HEAD (like the GitHub Action), then
+#                                     build the merged result. Nothing is committed or changed.
 #   ./build-local.sh --rebuild-image  rebuild the Docker image (e.g. after editing Dockerfile)
 #   ./build-local.sh --flash          flash the keyboard after a successful build
 #                                     (put the board in bootloader mode first: press the
@@ -18,8 +19,9 @@
 #               (default: native if qmk + arm-none-eabi-gcc are installed,
 #                otherwise docker, otherwise podman)
 #
-# --fetch commits the Oryx source to the local 'oryx' branch and merges it into
-# your current branch. Nothing is pushed and the submodule is not updated.
+# --fetch does the merge in throwaway detached worktrees: no branches are moved,
+# no commits are added to your branches, nothing is pushed, and your working tree
+# and the submodule are left alone. Only *committed* changes in HEAD are merged.
 
 set -euo pipefail
 
@@ -38,7 +40,7 @@ for arg in "$@"; do
     --fetch) FETCH=1 ;;
     --flash) FLASH=1 ;;
     --rebuild-image) REBUILD_IMAGE=1 ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "Unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
@@ -52,14 +54,17 @@ if [[ -z "${ENGINE:-}" ]]; then
 fi
 
 TMP_DIR=""
+LAYOUT_SRC="$LAYOUT_ID"
 cleanup_tmp() {
   if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
     git worktree remove --force "$TMP_DIR/oryx" 2>/dev/null || true
+    git worktree remove --force "$TMP_DIR/merge" 2>/dev/null || true
     rm -rf "$TMP_DIR"
     git worktree prune
   fi
   TMP_DIR=""
 }
+trap cleanup_tmp EXIT
 
 fetch_layout() {
   echo "==> Fetching latest layout '${LAYOUT_ID}' (${GEOMETRY}) from Oryx"
@@ -84,54 +89,52 @@ EOF
   title=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["layout"]["revision"]["title"] or "")' <<<"$response")
   [[ -n "$title" ]] || title="latest layout modification made with Oryx"
 
-  local target
-  target="$(git rev-parse --abbrev-ref HEAD)"
-  if [[ "$target" == "oryx" || "$target" == "HEAD" ]]; then
-    echo "Check out the branch you want to merge into (e.g. main) first; currently on '${target}'." >&2
-    exit 1
-  fi
-  if [[ -n "$(git status --porcelain --ignore-submodules=all --untracked-files=no)" ]]; then
-    echo "Working tree has uncommitted changes. Commit or stash them before using --fetch." >&2
-    exit 1
+  if [[ -n "$(git status --porcelain --ignore-submodules=all -- "$LAYOUT_ID")" ]]; then
+    echo "    Warning: uncommitted changes in ./${LAYOUT_ID} are NOT included in the merge." >&2
   fi
 
   git fetch --quiet origin oryx 2>/dev/null || echo "    (could not fetch origin/oryx; using local branch)"
-  if ! git show-ref --verify --quiet refs/heads/oryx; then
-    if ! git show-ref --verify --quiet refs/remotes/origin/oryx; then
-      echo "No 'oryx' branch found locally or on origin." >&2
-      exit 1
+  local base_ref
+  if git show-ref --verify --quiet refs/heads/oryx; then
+    base_ref=oryx
+    if git show-ref --verify --quiet refs/remotes/origin/oryx \
+        && git merge-base --is-ancestor oryx origin/oryx; then
+      base_ref=origin/oryx
     fi
-    git branch oryx origin/oryx
-  elif git show-ref --verify --quiet refs/remotes/origin/oryx \
-      && git merge-base --is-ancestor oryx origin/oryx; then
-    git branch -f oryx origin/oryx
+  elif git show-ref --verify --quiet refs/remotes/origin/oryx; then
+    base_ref=origin/oryx
+  else
+    echo "No 'oryx' branch found locally or on origin." >&2
+    exit 1
   fi
 
-  # Use a temporary worktree so the oryx branch can be committed to without
-  # touching your current working tree.
   TMP_DIR="$(mktemp -d)"
-  trap cleanup_tmp EXIT
-  git worktree add --quiet "$TMP_DIR/oryx" oryx
+  local ident=(-c user.name=build-local -c user.email=build-local@localhost)
+
+  # 1. Detached worktree on the last imported Oryx state + the new download
+  git worktree add --quiet --detach "$TMP_DIR/oryx" "$base_ref"
   curl -fsSL "https://oryx.zsa.io/source/${hash_id}" -o "$TMP_DIR/source.zip"
   unzip -oj "$TMP_DIR/source.zip" '*_source/*' -d "$TMP_DIR/oryx/$LAYOUT_ID" >/dev/null
   git -C "$TMP_DIR/oryx" add -A -- "$LAYOUT_ID"
   if git -C "$TMP_DIR/oryx" diff --cached --quiet; then
-    echo "    No layout change on Oryx"
+    echo "    No new layout changes on Oryx since '${base_ref}'"
   else
-    git -C "$TMP_DIR/oryx" commit -q -m "✨(oryx): ${title}"
-    echo "    Committed to 'oryx': ${title}"
+    git -C "$TMP_DIR/oryx" "${ident[@]}" commit -q -m "oryx: ${title}"
+    echo "    Oryx change: ${title}"
   fi
-  cleanup_tmp
+  local oryx_commit
+  oryx_commit="$(git -C "$TMP_DIR/oryx" rev-parse HEAD)"
 
-  if git merge-base --is-ancestor oryx HEAD; then
-    echo "    '${target}' already contains the latest Oryx layout"
-  else
-    echo "==> Merging 'oryx' into '${target}'"
-    if ! git merge --no-edit -Xignore-all-space oryx; then
-      echo "Merge conflict. Resolve it (git status), commit, then re-run without --fetch." >&2
-      exit 1
-    fi
+  # 2. Detached worktree on HEAD, merge the Oryx state into it
+  git worktree add --quiet --detach "$TMP_DIR/merge" HEAD
+  echo "==> Merging Oryx layout with HEAD (temporary, detached)"
+  if ! git -C "$TMP_DIR/merge" "${ident[@]}" merge --no-edit -Xignore-all-space "$oryx_commit"; then
+    echo "Merge conflict in:" >&2
+    git -C "$TMP_DIR/merge" diff --name-only --diff-filter=U >&2
+    echo "Resolve it by hand, e.g. merge the 'oryx' branch into your branch with git." >&2
+    exit 1
   fi
+  LAYOUT_SRC="$TMP_DIR/merge/$LAYOUT_ID"
 }
 
 ensure_image() {
@@ -143,7 +146,7 @@ ensure_image() {
 
 [[ $FETCH -eq 1 ]] && fetch_layout
 
-if [[ ! -d "$LAYOUT_ID" ]]; then
+if [[ ! -d "$LAYOUT_SRC" ]]; then
   echo "Layout folder ./${LAYOUT_ID} not found. Run with --fetch first." >&2
   exit 1
 fi
@@ -165,7 +168,7 @@ fi
 echo "==> Copying keymap into ${keyboard_dir}/${GEOMETRY}/keymaps/${LAYOUT_ID}"
 rm -rf "${keyboard_dir}/${GEOMETRY}/keymaps/${LAYOUT_ID}"
 mkdir -p "${keyboard_dir}/${GEOMETRY}/keymaps"
-cp -r "$LAYOUT_ID" "${keyboard_dir}/${GEOMETRY}/keymaps/${LAYOUT_ID}"
+cp -r "$LAYOUT_SRC" "${keyboard_dir}/${GEOMETRY}/keymaps/${LAYOUT_ID}"
 
 echo "==> Compiling ${make_prefix}${GEOMETRY}:${LAYOUT_ID} (${ENGINE})"
 if [[ "$ENGINE" == "native" ]]; then
