@@ -127,7 +127,7 @@ EOF
 
   # 2. Detached worktree on HEAD, merge the Oryx state into it
   git worktree add --quiet --detach "$TMP_DIR/merge" HEAD
-  echo "==> Merging Oryx layout with HEAD (temporary, detached)"
+  echo "==> Merging Oryx layout with HEAD (temporary, detached) from $oryx_commit"
   if ! git -C "$TMP_DIR/merge" "${ident[@]}" merge --no-edit -Xignore-all-space "$oryx_commit"; then
     echo "Merge conflict in:" >&2
     git -C "$TMP_DIR/merge" diff --name-only --diff-filter=U >&2

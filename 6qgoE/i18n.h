@@ -16,3 +16,4 @@
 #define DK_PIPE ALGR(KC_EQL)
 #define DK_TILD ALGR(KC_RBRC)
 #define DK_CIRC S(KC_RBRC)
+#define DK_GRV S(KC_EQL)
