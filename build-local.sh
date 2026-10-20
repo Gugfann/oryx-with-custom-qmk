@@ -125,10 +125,13 @@ EOF
   local oryx_commit
   oryx_commit="$(git -C "$TMP_DIR/oryx" rev-parse HEAD)"
 
-  # 2. Detached worktree on HEAD, merge the Oryx state into it
+  # 2. Detached worktree on HEAD, merge the Oryx state into it.
+  # Prefer the already-committed custom layout in HEAD when both sides edit the same
+  # generated file, so the local merge script does not keep tripping on the same Oryx
+  # conflict every time the layout is refreshed.
   git worktree add --quiet --detach "$TMP_DIR/merge" HEAD
   echo "==> Merging Oryx layout with HEAD (temporary, detached) from $oryx_commit"
-  if ! git -C "$TMP_DIR/merge" "${ident[@]}" merge --no-edit -Xignore-all-space "$oryx_commit"; then
+  if ! git -C "$TMP_DIR/merge" "${ident[@]}" merge --no-edit -Xours "$oryx_commit"; then
     echo "Merge conflict in:" >&2
     git -C "$TMP_DIR/merge" diff --name-only --diff-filter=U >&2
     echo "Resolve it by hand, e.g. merge the 'oryx' branch into your branch with git." >&2
